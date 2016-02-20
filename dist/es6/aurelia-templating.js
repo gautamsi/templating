@@ -120,6 +120,81 @@ export class Animator {
   unregisterEffect(effectName: string): void {}
 }
 
+interface CompositionTransactionOwnershipToken {
+  waitForCompositionComplete(): Promise<void>;
+}
+
+interface CompositionTransactionNotifier {
+  done(): void;
+}
+
+/**
+* Enables an initiator of a view composition to track any internal async rendering processes for completion.
+*/
+export class CompositionTransaction {
+  /**
+  * Creates an instance of CompositionTransaction.
+  */
+  constructor() {
+    this._ownershipToken = null;
+    this._compositionCount = 0;
+  }
+  
+  /**
+  * Attempt to take ownership of the composition transaction.
+  * @return An ownership token if successful, otherwise null.
+  */
+  tryCapture(): CompositionTransactionOwnershipToken {
+    if (this._ownershipToken !== null) {
+      return null;
+    }  
+    
+    return this._ownershipToken = this._createOwnershipToken();
+  }
+  
+  /**
+  * Enlist an async render operation into the transaction.
+  * @return A completion notifier.
+  */
+  enlist(): CompositionTransactionNotifier {
+    let that = this;
+    
+    that._compositionCount++;
+    
+    return {
+      done() {
+        that._compositionCount--;
+        that._tryCompleteTransaction();
+      }
+    };
+  }
+  
+  _tryCompleteTransaction() {
+    if (this._compositionCount <= 0) {
+      this._compositionCount = 0;
+      
+      if (this._ownershipToken !== null) {
+        let capture = this._ownershipToken;
+        this._ownershipToken = null;
+        capture._resolve();
+      }
+    }
+  }
+  
+  _createOwnershipToken(): CompositionTransactionOwnershipToken {
+    let token = {};
+    let promise = new Promise((resolve, reject) => {
+      token._resolve = resolve;
+    });
+    
+    token.waitForCompositionComplete = () => {
+      this._tryCompleteTransaction();
+      return promise;
+    };
+    
+    return token;
+  }
+}
 const capitalMatcher = /([A-Z])/g;
 
 function addHyphenAndLower(char) {
@@ -2000,6 +2075,10 @@ function elementContainerGet(key) {
 
   if (key === ElementEvents) {
     return this.elementEvents || (this.elementEvents = new ElementEvents(this.element));
+  }
+  
+  if (key === CompositionTransaction) {
+    return this.compositionTransaction || (this.compositionTransaction = this.parent.get(key));
   }
 
   if (key === ViewResources) {
@@ -4276,7 +4355,7 @@ export class HtmlBehaviorResource {
   }
 }
 
-function createChildObserverDecorator(selectorOrConfig, all) {
+function createChildObserverDecorator(selectorOrConfig, all, deep) {
   return function(target, key, descriptor) {
     let actualTarget = typeof key === 'string' ? target.constructor : target; //is it on a property or a class?
     let r = metadata.getOrCreateOwn(metadata.resource, HtmlBehaviorResource, actualTarget);
@@ -4284,7 +4363,8 @@ function createChildObserverDecorator(selectorOrConfig, all) {
     if (typeof selectorOrConfig === 'string') {
       selectorOrConfig = {
         selector: selectorOrConfig,
-        name: key
+        name: key,
+        deep:deep || false
       };
     }
 
@@ -4300,15 +4380,15 @@ function createChildObserverDecorator(selectorOrConfig, all) {
 /**
 * Creates a behavior property that references an array of immediate content child elements that matches the provided selector.
 */
-export function children(selectorOrConfig: string | Object): any {
-  return createChildObserverDecorator(selectorOrConfig, true);
+export function children(selectorOrConfig: string | Object, deep?: boolean): any {
+  return createChildObserverDecorator(selectorOrConfig, true, deep);
 }
 
 /**
 * Creates a behavior property that references an immediate content child element that matches the provided selector.
 */
-export function child(selectorOrConfig: string | Object): any {
-  return createChildObserverDecorator(selectorOrConfig, false);
+export function child(selectorOrConfig: string | Object, deep?: boolean): any {
+  return createChildObserverDecorator(selectorOrConfig, false, deep);
 }
 
 class ChildObserver {
@@ -4317,10 +4397,11 @@ class ChildObserver {
     this.changeHandler = config.changeHandler || this.name + 'Changed';
     this.selector = config.selector;
     this.all = config.all;
+    this.deep = config.deep;
   }
 
   create(target, viewModel) {
-    return new ChildObserverBinder(this.selector, target, this.name, viewModel, this.changeHandler, this.all);
+    return new ChildObserverBinder(this.selector, target, this.name, viewModel, this.changeHandler, this.all, this.deep);
   }
 }
 
@@ -4380,13 +4461,24 @@ function onChildChange(mutations, observer) {
 }
 
 class ChildObserverBinder {
-  constructor(selector, target, property, viewModel, changeHandler, all) {
+  constructor(selector, target, property, viewModel, changeHandler, all, deep) {
     this.selector = selector;
     this.target = target;
     this.property = property;
     this.viewModel = viewModel;
     this.changeHandler = changeHandler in viewModel ? changeHandler : null;
     this.all = all;
+    this.deep = deep;
+  }
+  firstMatch(elements, selector){
+      if(elements.length ==0)
+        return undefined;
+      
+      for (var index = 0; index < elements.length; index++) {
+          var element = elements[index];
+          if(element.matches(selector))
+            return element;
+      }
   }
 
   bind(source) {
@@ -4405,7 +4497,7 @@ class ChildObserverBinder {
     observer.binders.push(this);
 
     if (this.all) {
-      let items = viewModel[this.property];
+      let items:any[] = viewModel[this.property];
       if (!items) {
         items = viewModel[this.property] = [];
       } else {
@@ -4416,27 +4508,46 @@ class ChildObserverBinder {
         if (current.matches(selector)) {
           items.push(current.au && current.au.controller ? current.au.controller.viewModel : current);
         }
+        else if(this.deep){
+            let first:Element = this.firstMatch(current.getElementsByTagName("*"),selector);
+            if(first){
+                while (first) {
+                    if (first.matches(selector)) {
+                        items.push(first.au && first.au.controller ? first.au.controller.viewModel : first);
+                    }
+                    first = first.nextElementSibling;
+                }
+            } 
+        }
 
         current = current.nextElementSibling;
-      }
+      }      
 
       if (this.changeHandler !== null) {
         this.viewModel[this.changeHandler](noMutations);
       }
     } else {
+      let value = undefined;
       while (current) {
         if (current.matches(selector)) {
-          let value = current.au && current.au.controller ? current.au.controller.viewModel : current;
+          value = current.au && current.au.controller ? current.au.controller.viewModel : current;
+          break;
+        }
+        else if(this.deep && !value){
+            let firstDeep = this.firstMatch(current.getElementsByTagName("*"), selector);
+            if(firstDeep){
+                value = firstDeep.au && firstDeep.au.controller ? firstDeep.au.controller.viewModel : firstDeep;
+            }
+        }
+
+        current = current.nextElementSibling;
+      }
+      if(value){
           this.viewModel[this.property] = value;
 
           if (this.changeHandler !== null) {
             this.viewModel[this.changeHandler](value);
           }
-
-          break;
-        }
-
-        current = current.nextElementSibling;
       }
     }
   }
@@ -4578,25 +4689,31 @@ export class CompositionEngine {
   }
 
   _createControllerAndSwap(context) {
-    let removeResponse = context.viewSlot.removeAll(true);
-    let afterRemove = () => {
-      return this.createController(context).then(controller => {
+    function swap(controller) {
+      return Promise.resolve(context.viewSlot.removeAll(true)).then(() => {
         if (context.currentController) {
           context.currentController.unbind();
         }
 
-        controller.automate(context.overrideContext, context.owningView);
         context.viewSlot.add(controller.view);
+        
+        if (context.compositionTransactionNotifier) {
+          context.compositionTransactionNotifier.done();
+        }
 
         return controller;
       });
-    };
-
-    if (removeResponse instanceof Promise) {
-      return removeResponse.then(afterRemove);
     }
-
-    return afterRemove();
+    
+    return this.createController(context).then(controller => {
+      controller.automate(context.overrideContext, context.owningView);
+      
+      if (context.compositionTransactionOwnershipToken) {
+        return context.compositionTransactionOwnershipToken.waitForCompositionComplete().then(() => swap(controller));
+      } else {
+        return swap(controller);
+      }
+    });
   }
 
   /**
@@ -4668,6 +4785,15 @@ export class CompositionEngine {
   compose(context: CompositionContext): Promise<View | Controller> {
     context.childContainer = context.childContainer || context.container.createChild();
     context.view = this.viewLocator.getViewStrategy(context.view);
+    
+    let transaction = context.childContainer.get(CompositionTransaction);
+    let compositionTransactionOwnershipToken = transaction.tryCapture();
+    
+    if (compositionTransactionOwnershipToken) {
+      context.compositionTransactionOwnershipToken = compositionTransactionOwnershipToken;
+    } else {
+      context.compositionTransactionNotifier = transaction.enlist();
+    }
 
     if (context.viewModel) {
       return this._createControllerAndSwap(context);
@@ -4677,21 +4803,26 @@ export class CompositionEngine {
       }
 
       return context.view.loadViewFactory(this.viewEngine, new ViewCompileInstruction()).then(viewFactory => {
-        let removeResponse = context.viewSlot.removeAll(true);
-
-        if (removeResponse instanceof Promise) {
-          return removeResponse.then(() => {
-            let result = viewFactory.create(context.childContainer);
-            result.bind(context.bindingContext, context.overrideContext);
-            context.viewSlot.add(result);
-            return result;
-          });
-        }
-
         let result = viewFactory.create(context.childContainer);
         result.bind(context.bindingContext, context.overrideContext);
-        context.viewSlot.add(result);
-        return result;
+        
+        let work = () => {
+          return Promise.resolve(context.viewSlot.removeAll(true)).then(() => {
+            context.viewSlot.add(result);
+            
+            if (context.compositionTransactionNotifier) {
+              context.compositionTransactionNotifier.done();
+            }
+            
+            return result;
+          });
+        };
+        
+        if (context.compositionTransactionOwnershipToken) {
+          return context.compositionTransactionOwnershipToken.waitForCompositionComplete().then(work);
+        } else {
+          return work();
+        }
       });
     } else if (context.viewSlot) {
       context.viewSlot.removeAll();

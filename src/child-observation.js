@@ -2,7 +2,7 @@ import {DOM} from 'aurelia-pal';
 import {metadata} from 'aurelia-metadata';
 import {HtmlBehaviorResource} from './html-behavior';
 
-function createChildObserverDecorator(selectorOrConfig, all) {
+function createChildObserverDecorator(selectorOrConfig, all, deep) {
   return function(target, key, descriptor) {
     let actualTarget = typeof key === 'string' ? target.constructor : target; //is it on a property or a class?
     let r = metadata.getOrCreateOwn(metadata.resource, HtmlBehaviorResource, actualTarget);
@@ -10,7 +10,8 @@ function createChildObserverDecorator(selectorOrConfig, all) {
     if (typeof selectorOrConfig === 'string') {
       selectorOrConfig = {
         selector: selectorOrConfig,
-        name: key
+        name: key,
+        deep:deep || false
       };
     }
 
@@ -26,15 +27,15 @@ function createChildObserverDecorator(selectorOrConfig, all) {
 /**
 * Creates a behavior property that references an array of immediate content child elements that matches the provided selector.
 */
-export function children(selectorOrConfig: string | Object): any {
-  return createChildObserverDecorator(selectorOrConfig, true);
+export function children(selectorOrConfig: string | Object, deep?: boolean): any {
+  return createChildObserverDecorator(selectorOrConfig, true, deep);
 }
 
 /**
 * Creates a behavior property that references an immediate content child element that matches the provided selector.
 */
-export function child(selectorOrConfig: string | Object): any {
-  return createChildObserverDecorator(selectorOrConfig, false);
+export function child(selectorOrConfig: string | Object, deep?: boolean): any {
+  return createChildObserverDecorator(selectorOrConfig, false, deep);
 }
 
 class ChildObserver {
@@ -43,10 +44,11 @@ class ChildObserver {
     this.changeHandler = config.changeHandler || this.name + 'Changed';
     this.selector = config.selector;
     this.all = config.all;
+    this.deep = config.deep;
   }
 
   create(target, viewModel) {
-    return new ChildObserverBinder(this.selector, target, this.name, viewModel, this.changeHandler, this.all);
+    return new ChildObserverBinder(this.selector, target, this.name, viewModel, this.changeHandler, this.all, this.deep);
   }
 }
 
@@ -106,13 +108,24 @@ function onChildChange(mutations, observer) {
 }
 
 class ChildObserverBinder {
-  constructor(selector, target, property, viewModel, changeHandler, all) {
+  constructor(selector, target, property, viewModel, changeHandler, all, deep) {
     this.selector = selector;
     this.target = target;
     this.property = property;
     this.viewModel = viewModel;
     this.changeHandler = changeHandler in viewModel ? changeHandler : null;
     this.all = all;
+    this.deep = deep;
+  }
+  firstMatch(elements, selector){
+      if(elements.length ==0)
+        return undefined;
+      
+      for (var index = 0; index < elements.length; index++) {
+          var element = elements[index];
+          if(element.matches(selector))
+            return element;
+      }
   }
 
   bind(source) {
@@ -131,7 +144,7 @@ class ChildObserverBinder {
     observer.binders.push(this);
 
     if (this.all) {
-      let items = viewModel[this.property];
+      let items:any[] = viewModel[this.property];
       if (!items) {
         items = viewModel[this.property] = [];
       } else {
@@ -142,27 +155,46 @@ class ChildObserverBinder {
         if (current.matches(selector)) {
           items.push(current.au && current.au.controller ? current.au.controller.viewModel : current);
         }
+        else if(this.deep){
+            let first:Element = this.firstMatch(current.getElementsByTagName("*"),selector);
+            if(first){
+                while (first) {
+                    if (first.matches(selector)) {
+                        items.push(first.au && first.au.controller ? first.au.controller.viewModel : first);
+                    }
+                    first = first.nextElementSibling;
+                }
+            } 
+        }
 
         current = current.nextElementSibling;
-      }
+      }      
 
       if (this.changeHandler !== null) {
         this.viewModel[this.changeHandler](noMutations);
       }
     } else {
+      let value = undefined;
       while (current) {
         if (current.matches(selector)) {
-          let value = current.au && current.au.controller ? current.au.controller.viewModel : current;
+          value = current.au && current.au.controller ? current.au.controller.viewModel : current;
+          break;
+        }
+        else if(this.deep && !value){
+            let firstDeep = this.firstMatch(current.getElementsByTagName("*"), selector);
+            if(firstDeep){
+                value = firstDeep.au && firstDeep.au.controller ? firstDeep.au.controller.viewModel : firstDeep;
+            }
+        }
+
+        current = current.nextElementSibling;
+      }
+      if(value){
           this.viewModel[this.property] = value;
 
           if (this.changeHandler !== null) {
             this.viewModel[this.changeHandler](value);
           }
-
-          break;
-        }
-
-        current = current.nextElementSibling;
       }
     }
   }

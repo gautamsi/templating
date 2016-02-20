@@ -8,6 +8,12 @@ declare module 'aurelia-templating' {
   import { Binding, createOverrideContext, ValueConverterResource, BindingBehaviorResource, subscriberCollection, bindingMode, ObserverLocator, EventManager, createScopeForTest }  from 'aurelia-binding';
   import { Container, resolver, inject }  from 'aurelia-dependency-injection';
   import { TaskQueue }  from 'aurelia-task-queue';
+  export interface CompositionTransactionOwnershipToken {
+    waitForCompositionComplete(): Promise<void>;
+  }
+  export interface CompositionTransactionNotifier {
+    done(): void;
+  }
   export interface EventHandler {
     eventName: string;
     bubbles: boolean;
@@ -270,6 +276,29 @@ declare module 'aurelia-templating' {
        * @param effectName identifier of the effect
        */
     unregisterEffect(effectName: string): void;
+  }
+  
+  /**
+  * Enables an initiator of a view composition to track any internal async rendering processes for completion.
+  */
+  export class CompositionTransaction {
+    
+    /**
+      * Creates an instance of CompositionTransaction.
+      */
+    constructor();
+    
+    /**
+      * Attempt to take ownership of the composition transaction.
+      * @return An ownership token if successful, otherwise null.
+      */
+    tryCapture(): CompositionTransactionOwnershipToken;
+    
+    /**
+      * Enlist an async render operation into the transaction.
+      * @return A completion notifier.
+      */
+    enlist(): CompositionTransactionNotifier;
   }
   
   /**
@@ -1418,18 +1447,19 @@ declare module 'aurelia-templating' {
   /**
   * Creates a behavior property that references an array of immediate content child elements that matches the provided selector.
   */
-  export function children(selectorOrConfig: string | Object): any;
+  export function children(selectorOrConfig: string | Object, deep?: boolean): any;
   
   /**
   * Creates a behavior property that references an immediate content child element that matches the provided selector.
   */
-  export function child(selectorOrConfig: string | Object): any;
+  export function child(selectorOrConfig: string | Object, deep?: boolean): any;
   class ChildObserver {
     constructor(config: any);
     create(target: any, viewModel: any): any;
   }
   class ChildObserverBinder {
-    constructor(selector: any, target: any, property: any, viewModel: any, changeHandler: any, all: any);
+    constructor(selector: any, target: any, property: any, viewModel: any, changeHandler: any, all: any, deep: any);
+    firstMatch(elements: any, selector: any): any;
     bind(source: any): any;
     onRemove(element: any): any;
     onAdd(element: any): any;
